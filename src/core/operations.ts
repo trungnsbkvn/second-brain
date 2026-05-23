@@ -1583,6 +1583,12 @@ const think: Operation = {
     // Codex P1 #7 + privacy: remote callers cannot persist via MCP.
     const safeSave = remote ? false : Boolean(p.save);
     const safeTake = remote ? false : Boolean(p.take);
+    // v0.40.2.0: thread source-scope scalars + remote flag for trajectory
+    // injection. `sourceScopeOpts(ctx)` returns the federated array (when
+    // present) OR the scalar; we pass both through to runThink which
+    // forwards to findTrajectory. CLI callers don't go through this op
+    // and get default scope + remote=false from runThink's CLI path.
+    const scope = sourceScopeOpts(ctx);
     const { runThink, persistSynthesis } = await import('./think/index.ts');
     const result = await runThink(ctx.engine, {
       question: String(p.question),
@@ -1594,6 +1600,9 @@ const think: Operation = {
       since: p.since ? String(p.since) : undefined,
       until: p.until ? String(p.until) : undefined,
       takesHoldersAllowList: ctx.takesHoldersAllowList,
+      ...(scope.sourceId !== undefined ? { sourceId: scope.sourceId } : {}),
+      ...(scope.sourceIds !== undefined ? { allowedSources: scope.sourceIds } : {}),
+      remote: ctx.remote === true,
     });
 
     // Persist if --save was passed locally
@@ -2892,6 +2901,11 @@ const find_trajectory: Operation = {
       type: 'string',
       description: 'Optional. Filter to a single canonical metric (e.g. "mrr", "arr", "team_size"). When omitted, all metrics return.',
     },
+    kind: {
+      type: 'string',
+      enum: ['metric', 'event', 'all'],
+      description: 'Optional. Filter by row shape: "metric" (typed-claim rows only), "event" (event_type rows only), or "all" (default). v0.40.2.0+.',
+    },
     since: {
       type: 'string',
       description: 'Optional lower bound on valid_from (YYYY-MM-DD or ISO).',
@@ -2910,6 +2924,9 @@ const find_trajectory: Operation = {
       throw new Error('find_trajectory requires entity_slug (string)');
     }
     const metric = typeof p.metric === 'string' ? p.metric : undefined;
+    const kind = (p.kind === 'metric' || p.kind === 'event' || p.kind === 'all')
+      ? (p.kind as 'metric' | 'event' | 'all')
+      : undefined;
     const since  = typeof p.since  === 'string' ? p.since  : undefined;
     const until  = typeof p.until  === 'string' ? p.until  : undefined;
     const limit  = typeof p.limit  === 'number' ? p.limit  : undefined;
@@ -2922,6 +2939,7 @@ const find_trajectory: Operation = {
       ...scope,
       remote: ctx.remote === true,
       metric,
+      kind,
       since,
       until,
       limit,
@@ -2933,6 +2951,8 @@ const find_trajectory: Operation = {
     // Engine result includes raw embeddings (Float32Array); strip those
     // before sending over MCP — they're bulky binary noise that consumers
     // never need at this layer.
+    // v0.40.2.0: event_type surfaces on the wire so remote callers (thin-
+    // client think, founder-scorecard) see the event-shaped rows.
     const wirePoints = points.map(pt => ({
       fact_id: pt.fact_id,
       valid_from: pt.valid_from.toISOString().slice(0, 10),
@@ -2940,6 +2960,7 @@ const find_trajectory: Operation = {
       value: pt.value,
       unit: pt.unit,
       period: pt.period,
+      event_type: pt.event_type,
       text: pt.text,
       source_session: pt.source_session,
       source_markdown_slug: pt.source_markdown_slug,

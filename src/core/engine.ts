@@ -462,6 +462,14 @@ export interface NewFact {
   claim_value?: number | null;
   claim_unit?: string | null;
   claim_period?: string | null;
+  /**
+   * v0.40.2.0 — event-shaped row marker ('meeting', 'job_change',
+   * 'location_change', etc). Mutually informational with `claim_metric`:
+   * a row can have either, both, or neither. Persisted into
+   * `facts.event_type` (migration v89). Existing callers don't need to
+   * set this — leaving it undefined preserves pre-v0.40 behavior.
+   */
+  event_type?: string | null;
 }
 
 /** Options shared by list-facts methods. */
@@ -518,6 +526,19 @@ export interface TrajectoryOpts {
   remote?: boolean;
   /** Metric filter. When set, only facts with this canonical metric label participate. */
   metric?: string;
+  /**
+   * v0.40.2.0 — kind filter. Default 'all'. Defensive opt that future-proofs
+   * the API now that event_type rows live alongside metric rows in the same
+   * table. Existing callers (founder-scorecard, eval-trajectory) pass
+   * 'metric' explicitly for clarity (no behavior change since their
+   * downstream math already skips NULL-metric rows). Richer event-shape
+   * filtering (job_change vs meeting vs location) is a v0.40.3+ TODO once
+   * the event schema gets structured fields.
+   *   - 'metric': only rows with claim_metric IS NOT NULL
+   *   - 'event':  only rows with event_type IS NOT NULL
+   *   - 'all':    both (default)
+   */
+  kind?: 'metric' | 'event' | 'all';
   /** Lower bound on valid_from (inclusive). YYYY-MM-DD or full ISO. */
   since?: string | Date;
   /** Upper bound on valid_from (inclusive). YYYY-MM-DD or full ISO. */
@@ -540,6 +561,17 @@ export interface TrajectoryPoint {
   value: number | null;
   unit: string | null;
   period: string | null;
+  /**
+   * v0.40.2.0 — event-shaped row marker (e.g. 'meeting', 'job_change',
+   * 'location_change'). Mutually informational with metric: a row can have
+   * (a) metric set + event_type null (typed claim like MRR=$50K),
+   * (b) metric null + event_type set (event like "last met Marco"), or
+   * (c) both null (legacy free-text fact row from pre-v0.35.4 brains).
+   * Both founder-scorecard's per-metric math and eval-trajectory's
+   * regression analysis already skip null-metric rows, so event-only
+   * rows ride through invisibly to those callers.
+   */
+  event_type: string | null;
   text: string;
   source_session: string | null;
   source_markdown_slug: string | null;

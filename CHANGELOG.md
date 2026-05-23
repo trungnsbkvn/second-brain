@@ -2,6 +2,79 @@
 
 All notable changes to GBrain will be documented in this file.
 
+## [0.40.2.0] - 2026-05-22
+
+**gbrain now uses the typed-claim timeline it's been quietly building to ground answers about what changed and when.** Ask `gbrain think` "when did Marco last switch jobs" or "what was the ARR in March" and the answer comes back rooted in a real chronological timeline of the metric facts your brain already extracted via the `extract_facts` cycle phase. The feature is on by default; flip `think.trajectory_enabled=false` to opt out.
+
+The same plumbing lands in the LongMemEval benchmark, with a methodology change you should know about: the benchmark harness now runs a Haiku preprocessing step over each haystack session before retrieval, populating the typed-claim substrate inline so trajectory routing has data to work with. This means the temporal-reasoning number we publish is "gbrain + Haiku-preprocess pipeline" vs "gbrain alone" — NOT directly comparable to the published LongMemEval baselines without that disclosure. We chose the contamination cost openly because the substrate's real production value lives in `gbrain think`, not the benchmark. The per-question JSON envelope stamps `methodology_note: "extractor=haiku-preprocess-full-haystack-v1"` so downstream readers see the preprocessing step is in the pipeline.
+
+## To take advantage of v0.40.2.0
+
+`gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor` warns about a partial migration:
+
+1. **Run the orchestrator manually:**
+   ```bash
+   gbrain apply-migrations --yes
+   ```
+2. **Your `gbrain think` calls start getting trajectory blocks on temporal/knowledge-update questions immediately** — no agent re-read needed. The feature reads from your existing `facts` table (the one `extract_facts` cycle phase has been populating); production users who already run that phase get the benefit at $0.
+3. **Verify the outcome:**
+   ```bash
+   gbrain think "when did Marco last switch jobs"  # spot-check a temporal question
+   GBRAIN_THINK_DEBUG=1 gbrain think "what's the current ARR"  # see the prompt with the trajectory block
+   ```
+4. **Opt out if you regress:**
+   ```bash
+   gbrain config set think.trajectory_enabled false
+   ```
+5. **If any step fails or the numbers look wrong,** please file an issue: https://github.com/garrytan/gbrain/issues with output of `gbrain doctor` and contents of `~/.gbrain/upgrade-errors.jsonl` if it exists.
+
+### Itemized changes
+
+**Substrate (migration v89 `facts_event_type_column`):**
+- `facts` table gains a nullable `event_type TEXT` column so the v0.35.7 typed-claim substrate can carry event-shaped rows (`event_type='meeting'`, `'job_change'`, `'location_change'`) alongside metric-shaped rows (`claim_metric` / `claim_value` etc). Temporal-reasoning LongMemEval questions ask about event chronology that the metric-only shape couldn't capture.
+- `TrajectoryPoint.event_type: string | null` projected by both PGLite and Postgres `findTrajectory` paths.
+- `TrajectoryOpts.kind?: 'metric' | 'event' | 'all'` filter added (default `'all'`). Existing callers (`founder-scorecard`, `eval-trajectory`) pass `kind: 'metric'` explicitly for call-site clarity — no behavior change, since both already defensively skipped NULL-metric rows in their per-metric math.
+- New `src/core/trajectory-format.ts` — shared `formatTrajectoryBlock(points, entitySlug, opts)` consumed by both `gbrain think` (production) and the LongMemEval harness (benchmark). Groups by `(metric ?? event_type)`, per-metric cap 20, total cap 100, knowledge_update intent annotates value-change rows with `(superseded prior)`.
+- `INJECTION_PATTERNS` in `src/core/think/sanitize.ts` extended to escape `</trajectory>`, `<trajectory ...>` open tags, and attribute injection. Adversarial fact text in extracted claims can't break out of the data envelope to inject instructions.
+
+**`gbrain think` integration (default ON):**
+- New `src/core/think/intent.ts` — pure `classifyIntent(question)` returns `'temporal' | 'knowledge_update' | 'other'`. Regex-first, no LLM call. The `'other'` fast path short-circuits with zero SQL.
+- New `src/core/think/entity-extract.ts` — `extractCandidateEntities(question, retrievedSlugs)` pulls high-precision candidates from retrieved entity-prefix slugs (`people/`, `companies/`, `organizations/`) and medium-precision noun phrases from the question. Stop-word boundaries + leading-verb stripper handle "When did I last meet Marco" → `marco` cleanly.
+- `buildThinkUserMessage` extended with a `trajectory?: ThinkTrajectoryBlockOpts` slot that honors BOTH existing prompt orderings (calibration mode: retrieval → calibration → trajectory → question; default mode: question → retrieval → trajectory → instruction). No third ordering invented.
+- `runThink` orchestrates intent → entity → `findTrajectory` (5s `Promise.race` timeout per candidate, concurrency cap 3) → formatted block. The MCP `think` op handler extracts `sourceScopeOpts(ctx)` to scalar `sourceId`/`allowedSources`/`remote` fields on `RunThinkOpts` so federated-read OAuth clients can't see trajectory rows outside their source scope.
+- New config key `think.trajectory_enabled` (default `true`). Flip to `false` to bypass entirely. Any error in the trajectory path degrades to "no block injected" + `TRAJECTORY_INJECTION_FAILED` warning — the think call itself never crashes from trajectory.
+
+**LongMemEval inline Haiku extractor:**
+- New `src/eval/longmemeval/extract.ts` — `extractAndInsertClaims()` populates the benchmark brain's `facts` table inline at import time. Single Haiku call per session with content-hash cache (cuts a 3-iteration benchmark run from $1.50 to $0.50 when sessions repeat across questions, as they do in LongMemEval).
+- Per-question alias map — `"Marco"` + `"Marco Smith"` + `"marco"` in the SAME question collapse to one canonical slug via first-mention-wins. Fresh map per question; aliases never leak across.
+- Fail-open: malformed JSON, Haiku throw, insert collision, empty array — all return `inserted: 0` without throwing. One bad session never kills the per-question loop.
+- `getCacheStats()` writes the empirical hit rate to stderr per benchmark run.
+
+**LongMemEval intent routing + methodology disclosure:**
+- New `src/eval/longmemeval/intent.ts` — prefers the dataset's `question_type` field (LongMemEval ships labels like `temporal-reasoning`, `knowledge-update`, `single-session-user`) before falling back to the SHARED regex set imported from `src/core/think/intent.ts`. Single source of truth — think and longmemeval cannot drift.
+- `runOneQuestion` routes temporal/knowledge_update intents through the shared `extractCandidateEntities` helper → `findTrajectory` → splice into the answer-gen prompt before the retrieved-sessions block.
+- New CLI flag `--no-trajectory` bypasses BOTH the extractor and the intent routing. Used by the measurement protocol to baseline default-on vs no-trajectory across 3 seeds per condition with paired-bootstrap CI.
+- JSON envelope adds 5 per-question fields when trajectory routing is on: `intent`, `trajectory_points`, `entity_resolved`, `resolution_source`, `methodology_note`. The methodology_note is also written to stderr at run completion. Honest disclosure of the preprocessing step.
+- Resolution-source gate divergence (documented): the production `gbrain think` path skips `fallback_slugify` resolutions (avoid querying invented slugs); the LongMemEval harness accepts them because the extractor and the lookup both go through the same slugify path on free-form names, so they cohere. Applying the think-path gate to the harness would permanently block trajectory injection on the benchmark.
+
+**Test coverage:**
+- 81 new tests across 9 files. All hermetic (no DATABASE_URL, no API keys) except where DATABASE_URL gates real-Postgres parity coverage.
+- `test/trajectory-format.test.ts` (17): grouping, caps, sanitization, supersession annotation, determinism, provenance, text-cap, adversarial `</trajectory>` escape.
+- `test/engine-parity-event-type.test.ts` (6): PGLite round-trip of the column + kind filter matrix.
+- `test/regressions/v0_40_2_0-trajectory-backcompat.test.ts` (4): pins byte-identical `computeFounderScorecard` + `computeTrajectoryStats` output with and without event rows in the input — the critical contract that event-only rows ride through invisibly to existing per-metric callers.
+- `test/think-intent.test.ts` (14): temporal, KU, other, precedence (KU wins when both match), defensive non-string inputs.
+- `test/think-entity-extract.test.ts` (10): retrieved-slug source, noun-phrase source, stop-word stripping, leading-verb stripping, dedup across sources, 5-candidate cap.
+- `test/think-trajectory-injection.test.ts` (7): temporal intent injection with superseded-prior annotation, `'other'` short-circuit, `withTrajectory: false` bypass, `think.trajectory_enabled=false` bypass, empty-trajectory skip, `findTrajectory` throw caught by `Promise.allSettled`, TRAJECTORY_INJECTED warning count.
+- `test/longmemeval-extract.test.ts` (13): JSON-repair adversarial inputs, alias collapsing within and across sessions in the same question, per-question reset on TRUNCATE, content-hash cache hit/miss with reported hit-rate format, fail-open paths.
+- `test/longmemeval-intent.test.ts` (9): dataset question_type → Intent mapping for all six LongMemEval labels, dataset label trumps question-text signal, unknown labels fall through to regex.
+- `test/longmemeval-trajectory-routing.test.ts` (4): end-to-end through `runEvalLongMemEval` with both clients stubbed — trajectory block lands in answer-gen prompt for temporal intent, absent for `'other'`, `--no-trajectory` bypasses, methodology_note stamped on every routed row, perf gate preserved.
+
+### Plan + reviews
+
+Plan file at `~/.claude/plans/system-instruction-you-are-working-crystalline-owl.md` carries the full design rationale, the CEO/Eng/Codex review history (3 review passes, all CLEARED), the measurement plan (3 seeds per condition + paired-bootstrap CI), and the hand-verification gate list. Codex flagged 18 findings during outside-voice review; 6 load-bearing ones folded as design decisions (alias-map wording, `resolveEntitySlugWithSource` resolution_source signal, prompt-placement preserving both calibration AND default ordering, INJECTION_PATTERNS extension for `</trajectory>`, 5s findTrajectory timeout + 10s extractor timeout, doctor check deferred to v0.40.1+, real-LLM spot-check added, success metric broadened). The benchmark methodology contamination was the load-bearing decision — accepted with explicit CHANGELOG + JSON-envelope disclosure.
+
+
+
 ## [0.40.1.0] - 2026-05-22
 
 **Eval infrastructure that catches retrieval regressions before merge and proves answer-quality wins after ship.**
@@ -752,6 +825,7 @@ Community PR #1287 (by @garrytan-agents) diagnosed the hang correctly and propos
 - `scanBrainSources` now returns `partial` + `aborted_at_source` on `AuditReport` and `status` + `files_scanned` (+ optional `db_page_count`) per `PerSourceReport`. Any test that constructs `AuditReport` literals needs to include the new required fields. (One pre-existing test was updated as part of this PR.)
 - `runDoctor` still calls `process.exit` at the end — behavioral tests against it can't run via the unit-test runner. That refactor stays a TODO; the unit-test layer covers `scanBrainSources` + doctor's render shape via source-grep, and the heavy script covers end-to-end against a subprocess.
 
+
 ## [0.38.1.0] - 2026-05-21
 
 **Your `gbrain agent run` loop can now run on any provider with native tool calling — not just Anthropic.** OpenAI, Google Gemini, OpenRouter, openai-compatible servers (Ollama, LiteLLM, vLLM, llama-server) all work. Pick the cheapest model that does the job for your agent, or stay on Anthropic if you want the prompt-cache cost savings on long loops.
@@ -966,6 +1040,7 @@ The full plan estimated 12-14 weeks across all four phases. v0.38.0.0 lands Phas
 
 **Plan:** `~/.claude/plans/system-instruction-you-are-working-shimmying-breeze.md`. Wave went through `/plan-ceo-review` (Option B locked), `/plan-eng-review` (7 decisions D3-D9), and two codex outside-voice rounds (D11-D13 absorbed; round 2 caught blocker on missing Slice 1 stable-ID migration + 4 non-blockers).
 
+
 ## [0.38.0.0] - 2026-05-21
 
 **One command to capture anything into your brain. Local OR hosted, doesn't matter.**
@@ -1104,7 +1179,6 @@ These do not block the v0.38 release: the substrate is shipped and queryable; so
 
 `gbrain upgrade` should do this automatically. If it didn't, or if `gbrain doctor`
 warns about a partial migration:
-
 ## [0.37.11.0] - 2026-05-21
 
 **Fresh `gbrain init --pglite` works out of the box now.**
@@ -1461,6 +1535,29 @@ Credited contributors per the CHANGELOG attribution convention; closing comments
    ```bash
    gbrain apply-migrations --yes
    ```
+2. **Try the capture verb:**
+   ```bash
+   gbrain capture "first thought into v0.38"
+   gbrain query "first thought"
+   ```
+   The receipt block should show the slug + file path; the query should
+   return the page within a second.
+3. **For webhook ingestion** (only if you run `gbrain serve --http`):
+   ```bash
+   curl -X POST https://your-brain/ingest \
+     -H "Authorization: Bearer $TOKEN" \
+     -H "Content-Type: text/markdown" \
+     -d "# webhook test"
+   ```
+   You should see HTTP 202 + a `job_id`. Run `gbrain query "webhook test"`
+   to confirm the page landed.
+4. **If any step fails or the numbers look wrong,** please file an issue:
+   https://github.com/garrytan/gbrain/issues with:
+   - output of `gbrain doctor`
+   - contents of `~/.gbrain/upgrade-errors.jsonl` if it exists
+   - which step broke
+
+   This feedback loop is how the gbrain maintainers find fragile upgrade paths. Thank you.
 2. **Verify the source-routing fix on your federated brains:**
    ```bash
    gbrain sources current
