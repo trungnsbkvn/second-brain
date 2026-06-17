@@ -696,6 +696,19 @@ PR1 shipped the read-only catalog; PR2 is the download-and-install surface,
 deferred per the plan's D1 + D8 because it stands up new HTTP/binary/token
 infra and reaches into third-party packs that live outside the host skills dir.
 
+> **#2180 update (v0.43+ brain-resident skillpacks + advisor):** brain-resident
+> pack DISCOVERY over MCP shipped as a dedicated, source-scoped
+> `list_brain_skillpack` op (NOT folded into `list_skills` — the host catalog is
+> host-global and ignores `ctx.sourceId`, so per-source packs needed their own
+> tenancy-correct surface). `get_skill` gained an optional `source_id` for
+> per-source fetch disambiguation. The `tools:` version-skew lint below is now
+> implemented (`src/core/skillpack/brain-pack-lint.ts`, run by
+> `gbrain skillpack init-brain-pack`). STILL DEFERRED to this PR2: thin-client
+> BINARY install (`build_skillpack` download) — a thin client today gets the
+> pack's git scaffold spec and `resolveSource`s it on its own machine. The
+> `include_skillpacks` host-global merge below is intentionally still open
+> (separate concern from per-source brain packs).
+
 - [ ] **v0.41.37+: `build_skillpack` op + `GET /skillpack/download/:token` endpoint.** Build a deterministic `.tgz` on demand (named skillpack, ad-hoc skill subset, or whole repo) and deliver it both base64-inline (universal/stdio) and via an authenticated short-lived download URL when running under `gbrain serve --http`. **What:** new admin-or-write-scoped op + a token-store + cache-dir GC; reuse `packTarball` from `src/core/skillpack/tarball.ts` (already deterministic + symlink-rejecting + size-capped) and the magic-link nonce pattern in `serve-http.ts`. The tarball ships source CODE, so it needs its own trust decision separate from PR1's prose-only catalog. **Why:** lets a thin client install a skillpack into its own setup, not just follow one live. **Depends on:** PR1 (landed in v0.41.36.0). Priority: P2.
 - [ ] **v0.41.37+: `include_skillpacks` merge in `list_skills`.** Fold pinned third-party packs (from `~/.gbrain/skillpack-state.json`) into the catalog. Deferred from PR1 (D8) because packs live OUTSIDE the host skills dir and need (a) a per-pack trusted-root realpath confinement and (b) `{name, skillpack_name?}` disambiguation when a pack skill and a host skill share a name. Lands naturally with PR2's pack machinery. Priority: P2.
 - [ ] **v0.41.37+: TTL+mtime cache for the skill-catalog walk.** PR1 reads fresh every call (cold path, ~ms). If telemetry shows repeated `list_skills` calls, add a TTL+mtime-keyed cache shared by `list_skills` + `get_skill`. Priority: P3 (do-nothing was the deliberate PR1 call).
