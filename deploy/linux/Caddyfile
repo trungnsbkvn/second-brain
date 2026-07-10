@@ -1,0 +1,41 @@
+# second-brain.yplawfirm.vn — Caddy reverse proxy (automatic Let's Encrypt).
+#
+# Install:
+#   sudo cp Caddyfile /etc/caddy/Caddyfile
+#   # EDIT the @allowed remote_ip list below first!
+#   caddy validate --config /etc/caddy/Caddyfile
+#   sudo systemctl reload caddy
+#
+# DNS must be gray-cloud (DNS only) in Cloudflare for HTTP-01 issuance.
+# If orange-cloud is required later: switch to a Cloudflare origin cert or
+# a DNS-01 xcaddy build — do not fight HTTP-01 through the proxy.
+#
+# gbrain binds 127.0.0.1:3131 (see gbrain-http.service); Caddy terminates TLS.
+
+second-brain.yplawfirm.vn {
+
+	# Matches GBRAIN_HTTP_MAX_BODY_BYTES (10 MiB) + slack.
+	request_body {
+		max_size 12MB
+	}
+
+	# Admin SPA + admin API: bootstrap-token login must NOT be exposed to the
+	# open internet. Allowlist office/home IPs only; everyone else gets 403.
+	# 14.248.66.227 = Y&P office egress (2026-07-10) — update here if it changes.
+	@admin path /admin /admin/*
+	handle @admin {
+		@allowed remote_ip 127.0.0.1 14.248.66.227/32
+		handle @allowed {
+			# flush_interval -1: /admin/api/jobs/watch is an SSE stream.
+			reverse_proxy 127.0.0.1:3131 {
+				flush_interval -1
+			}
+		}
+		respond "forbidden" 403
+	}
+
+	# MCP endpoint + OAuth (/mcp, /token, /authorize, /.well-known/*, /health).
+	reverse_proxy 127.0.0.1:3131 {
+		flush_interval -1
+	}
+}

@@ -258,6 +258,35 @@ export const PHASE_SCOPE: Record<CyclePhase, PhaseScope> = {
 export const GLOBAL_PHASES: CyclePhase[] = ALL_PHASES.filter((p) => PHASE_SCOPE[p] === 'global');
 export const NON_GLOBAL_PHASES: CyclePhase[] = ALL_PHASES.filter((p) => PHASE_SCOPE[p] !== 'global');
 
+/**
+ * Multi-tenant strict source isolation (rental platform, 2026-07-10).
+ *
+ * On a brain whose sources belong to DIFFERENT customers (one gbrain, one
+ * source per tenant, per-client OAuth scoping), the phases below mix CONTENT
+ * across sources and are therefore cross-tenant leak vectors:
+ *
+ *   - synthesize          reads the brain-global transcripts dir (mixed)
+ *   - patterns            reads cross-source reflections (mixed)
+ *   - synthesize_concepts clusters atoms across ALL sources into shared
+ *                         concept pages — the direct leak
+ *   - grade_takes         retrieves evidence brain-wide to verdict takes
+ *   - calibration_profile aggregates resolved takes across sources
+ *   - resolve_symbol_edges can resolve a symbol to another source's chunk
+ *
+ * embed / orphans / purge / skillopt stay allowed: they iterate brain-wide
+ * but never merge one source's content into another's rows.
+ *
+ * Enforcement: runCycle drops these phases from ANY phase selection when the
+ * DB-plane config key `multi_tenant.strict_source_isolation` is true —
+ * single choke point covering `gbrain dream`, autopilot per-source fan-out,
+ * and the autopilot-global-maintenance job. Opt-in (default off) so
+ * single-owner brains keep full dream behavior.
+ */
+export const CROSS_SOURCE_CONTENT_PHASES: CyclePhase[] = [
+  'synthesize', 'patterns', 'synthesize_concepts',
+  'grade_takes', 'calibration_profile', 'resolve_symbol_edges',
+];
+
 /** Config key holding the ISO timestamp of the last successful global-maintenance run. */
 export const LAST_GLOBAL_AT_KEY = 'autopilot.last_global_at';
 
@@ -1408,7 +1437,29 @@ export async function runCycle(
   opts: CycleOpts,
 ): Promise<CycleReport> {
   const start = performance.now();
-  const phases = opts.phases ?? ALL_PHASES;
+  let phases = opts.phases ?? ALL_PHASES;
+  // Multi-tenant strict source isolation — see CROSS_SOURCE_CONTENT_PHASES.
+  // DB-plane key so operators flip it with `gbrain config set`. Tolerates
+  // JSON-quoted values ('"true"') from the config-set path. Fail-open on a
+  // missing config table: that only happens on a fresh brain mid-init,
+  // where there is no second tenant's content to leak yet.
+  if (engine) {
+    try {
+      const rows = await engine.executeRaw<{ value: string }>(
+        `SELECT value FROM config WHERE key = 'multi_tenant.strict_source_isolation' LIMIT 1`,
+      );
+      const v = String(rows[0]?.value ?? '').replace(/"/g, '').toLowerCase();
+      if (v === 'true' || v === '1') {
+        const dropped = phases.filter(p => CROSS_SOURCE_CONTENT_PHASES.includes(p));
+        if (dropped.length > 0) {
+          phases = phases.filter(p => !CROSS_SOURCE_CONTENT_PHASES.includes(p));
+          console.error(
+            `[cycle] multi_tenant.strict_source_isolation=true — dropped cross-source content phase(s): ${dropped.join(', ')}`,
+          );
+        }
+      }
+    } catch { /* config table absent (fresh brain) — nothing to leak */ }
+  }
   const dryRun = !!opts.dryRun;
   const pull = !!opts.pull;
   const timestamp = new Date().toISOString();

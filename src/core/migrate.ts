@@ -5505,6 +5505,85 @@ export const MIGRATIONS: Migration[] = [
         WHERE dimension IS NOT NULL;
     `,
   },
+  {
+    version: 123,
+    name: 'control_plane_rental_tables',
+    // Control plane for the multi-tenant "AI position rental" platform
+    // (second-brain.yplawfirm.vn). Four tables, all additive, no touch on
+    // existing schema:
+    //   cp_tenants          — business customers (slug drives the tenant's
+    //                         gbrain source naming: tenant-<slug>[...]).
+    //   cp_positions        — the rentable catalog: versioned position
+    //                         templates (references to seed pages / skillpack /
+    //                         schema pack live as paths, the artifacts
+    //                         themselves stay on disk / in sources).
+    //   cp_agent_instances  — what a tenant actually rents: one row per
+    //                         provisioned agent = one oauth_clients row
+    //                         (client_id, FK-by-convention — oauth_clients
+    //                         uses soft-delete so a hard FK would fight the
+    //                         suspend/resume flow) + one gbrain source.
+    //   cp_rental_requests  — self-service request → admin approve/reject
+    //                         queue (approve provisions an instance).
+    // Usage/billing reads join cp_agent_instances → mcp_request_log (by
+    // token_name = client_name) and mcp_spend_log (by client_id); no new
+    // metering tables here.
+    idempotent: true,
+    sql: `
+      CREATE TABLE IF NOT EXISTS cp_tenants (
+        id            SERIAL PRIMARY KEY,
+        slug          TEXT UNIQUE NOT NULL,
+        name          TEXT NOT NULL,
+        contact_email TEXT,
+        status        TEXT NOT NULL DEFAULT 'active',
+        plan          TEXT,
+        notes         TEXT,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS cp_positions (
+        id                   SERIAL PRIMARY KEY,
+        slug                 TEXT UNIQUE NOT NULL,
+        name                 TEXT NOT NULL,
+        description          TEXT,
+        version              TEXT NOT NULL DEFAULT '1.0.0',
+        seed_pages_dir       TEXT,
+        skillpack_ref        TEXT,
+        schema_pack_ref      TEXT,
+        price_month_cents    BIGINT NOT NULL DEFAULT 0,
+        included_calls_month INTEGER,
+        status               TEXT NOT NULL DEFAULT 'draft',
+        created_at           TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+
+      CREATE TABLE IF NOT EXISTS cp_agent_instances (
+        id             SERIAL PRIMARY KEY,
+        tenant_id      INTEGER NOT NULL REFERENCES cp_tenants(id),
+        position_id    INTEGER REFERENCES cp_positions(id),
+        client_id      TEXT NOT NULL,
+        client_name    TEXT NOT NULL,
+        source_id      TEXT NOT NULL,
+        status         TEXT NOT NULL DEFAULT 'active',
+        provisioned_at TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_cp_instances_tenant
+        ON cp_agent_instances(tenant_id);
+
+      CREATE TABLE IF NOT EXISTS cp_rental_requests (
+        id            SERIAL PRIMARY KEY,
+        tenant_id     INTEGER REFERENCES cp_tenants(id),
+        position_id   INTEGER REFERENCES cp_positions(id),
+        status        TEXT NOT NULL DEFAULT 'pending',
+        requested_by  TEXT,
+        note          TEXT,
+        decided_by    TEXT,
+        decision_note TEXT,
+        decided_at    TIMESTAMPTZ,
+        created_at    TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_cp_requests_status
+        ON cp_rental_requests(status, created_at DESC);
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0
