@@ -52,4 +52,22 @@ export const api = {
     apiFetchText(`/admin/api/calibration/charts/${encodeURIComponent(type)}${holder ? `?holder=${encodeURIComponent(holder)}` : ''}`),
   // v0.41 D2 — live minion-jobs dashboard snapshot.
   jobsWatch: () => apiFetch('/admin/api/jobs/watch'),
+  // Rental control plane (2026-07-10) — /admin/api/cp/* (serve-http-cp.ts).
+  cpTenants: () => apiFetch('/admin/api/cp/tenants'),
+  cpCreateTenant: (slug: string, name: string) =>
+    apiFetch('/admin/api/cp/tenants', { method: 'POST', body: JSON.stringify({ slug, name }) }),
+  cpTenantStatus: (id: number, status: string) =>
+    apiFetch(`/admin/api/cp/tenants/${id}/status`, { method: 'POST', body: JSON.stringify({ status }) }),
+  cpPositions: () => apiFetch('/admin/api/cp/positions'),
+  cpSavePosition: (p: { slug: string; name: string; priceMonthCents: number; status: string }) =>
+    apiFetch('/admin/api/cp/positions', { method: 'POST', body: JSON.stringify(p) }),
+  cpInstances: () => apiFetch('/admin/api/cp/instances'),
+  cpProvision: (tenantId: number, positionId: number | null, budgetUsdPerDay: number) =>
+    apiFetch('/admin/api/cp/instances', { method: 'POST', body: JSON.stringify({ tenantId, positionId, budgetUsdPerDay }) }),
+  cpInstanceAction: (id: number, action: 'suspend' | 'resume' | 'revoke') =>
+    apiFetch(`/admin/api/cp/instances/${id}/status`, { method: 'POST', body: JSON.stringify({ action }) }),
+  cpRequests: (status = 'pending') => apiFetch(`/admin/api/cp/requests?status=${status}`),
+  cpDecide: (id: number, decision: 'approve' | 'reject') =>
+    apiFetch(`/admin/api/cp/requests/${id}/decide`, { method: 'POST', body: JSON.stringify({ decision }) }),
+  cpUsage: (month: string) => apiFetch(`/admin/api/cp/usage?month=${month}`),
 };

@@ -1,0 +1,56 @@
+# gbrain HTTP MCP server — second-brain.yplawfirm.vn
+#
+# Install:
+#   sudo cp gbrain-http.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now gbrain-http
+#
+# Runs from bun source (/srv/gbrain/app), NOT the compiled binary — the
+# documented-safest Linux path, and the fork gets edited in place (control
+# plane lives here from Phase 3 on). Adapted from
+# docs/guides/minions-deployment-snippets/systemd.service (ExecStart swapped
+# from `jobs supervisor` to `serve --http`).
+
+[Unit]
+Description=gbrain HTTP MCP server (second-brain.yplawfirm.vn)
+Documentation=https://github.com/garrytan/gbrain/blob/master/docs/mcp/DEPLOY.md
+After=network-online.target postgresql.service ollama.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Unprivileged owner of /srv/gbrain (created in Phase 1 step 1).
+User=gbrain
+Group=gbrain
+WorkingDirectory=/srv/gbrain/app
+
+# Env file is mode 600, owned by User=. Do not put secrets in this unit.
+EnvironmentFile=/etc/gbrain.env
+
+# Loopback bind — Caddy terminates TLS on 443 and proxies here.
+# --public-url must match the external URL so OAuth discovery (RFC 8414)
+# advertises the right issuer.
+ExecStart=/srv/gbrain/.bun/bin/bun src/cli.ts serve --http --port 3131 --bind 127.0.0.1 --public-url https://second-brain.yplawfirm.vn
+
+Restart=always
+RestartSec=10s
+
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gbrain-http
+
+# Default 1024 is tight for Bun + Postgres pool + concurrent LLM calls.
+LimitNOFILE=65535
+
+# Hardening.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# Brain app + tenant source repos + GBRAIN_HOME (config.json, PID files).
+ReadWritePaths=/srv/gbrain /srv/brain-repos
+
+[Install]
+WantedBy=multi-user.target

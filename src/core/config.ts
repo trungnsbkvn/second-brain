@@ -852,6 +852,11 @@ export const KNOWN_CONFIG_KEYS: readonly string[] = [
   'search.image_query.max_bytes',
   'search.reranker.enabled',
   'search.track_retrieval',
+  // Multi-tenant rental platform (2026-07-10): when true, runCycle drops the
+  // cross-source content phases (see CROSS_SOURCE_CONTENT_PHASES in cycle.ts)
+  // from every dream/autopilot phase selection. Set on any brain that hosts
+  // more than one customer's sources.
+  'multi_tenant.strict_source_isolation',
   // Models tier system (v0.31.12)
   'models.default',
   'models.tier.utility',

@@ -1,0 +1,47 @@
+# gbrain minion worker — background enrichment/subagent jobs (Postgres-only).
+#
+# Install:
+#   sudo cp gbrain-worker.service /etc/systemd/system/
+#   sudo systemctl daemon-reload && sudo systemctl enable --now gbrain-worker
+#
+# Same as docs/guides/minions-deployment-snippets/systemd.service, with paths
+# adjusted for the /srv/gbrain/app bun-source layout.
+
+[Unit]
+Description=gbrain minion worker
+Documentation=https://github.com/garrytan/gbrain/blob/master/docs/guides/minions-deployment.md
+After=network-online.target postgresql.service gbrain-http.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=gbrain
+Group=gbrain
+WorkingDirectory=/srv/gbrain/app
+
+EnvironmentFile=/etc/gbrain.env
+
+# Two-layer supervision: systemd restarts the supervisor on host events;
+# the supervisor restarts `gbrain jobs work` on in-process crashes.
+ExecStart=/srv/gbrain/.bun/bin/bun src/cli.ts jobs supervisor --concurrency 2
+
+Restart=always
+RestartSec=10s
+
+KillSignal=SIGTERM
+TimeoutStopSec=30s
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=gbrain-worker
+
+LimitNOFILE=65535
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=/srv/gbrain /srv/brain-repos
+
+[Install]
+WantedBy=multi-user.target

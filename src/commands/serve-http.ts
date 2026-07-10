@@ -30,6 +30,19 @@ import type { SqlQuery } from '../core/oauth-provider.ts';
 import { hasScope, ALLOWED_SCOPES_LIST, normalizeScopesInput } from '../core/scope.ts';
 import { summarizeMcpParams, dispatchToolCall } from '../mcp/dispatch.ts';
 import { paramDefToSchema } from '../mcp/tool-defs.ts';
+import { mountControlPlane } from './serve-http-cp.ts';
+import { checkBudget, recordSpend, BudgetExceededError } from '../core/spend-log.ts';
+
+// Rental metering (control plane, 2026-07-10): flat per-op spend estimates in
+// cents for LLM-bearing ops reachable over HTTP MCP. Deliberately conservative
+// stand-ins until the AI gateway threads real token usage back through
+// dispatch; they exist so oauth_clients.budget_usd_per_day caps EVERY LLM
+// path, not just Voyage image search + subagents. Keyed by op name.
+const LLM_OP_SPEND_CENTS_ESTIMATE: Record<string, number> = {
+  think: 2,      // full reasoning loop over retrieved context
+  query: 0.5,    // hybrid RAG: expansion LLM + reranker
+  advisor: 2,    // multi-step advisory loop
+};
 import { getBrainHotMemoryMeta } from '../core/facts/meta-hook.ts';
 import { loadConfig } from '../core/config.ts';
 import { buildError, serializeError } from '../core/errors.ts';
@@ -1328,12 +1341,35 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
         });
         return;
       }
+      // Control-plane fix (2026-07-10): accept sourceId + federatedRead so
+      // the admin SPA can register source-scoped clients — previously this
+      // endpoint hard-coded 'default', which silently produced clients with
+      // read/write on the default source regardless of intent. Pre-check the
+      // source exists so a typo is a 400, not an FK 500 (v64 flipped the
+      // oauth_clients.source_id FK to ON DELETE RESTRICT).
+      const requestedSource = typeof req.body.sourceId === 'string' && req.body.sourceId.trim()
+        ? req.body.sourceId.trim() : 'default';
+      if (requestedSource !== 'default') {
+        const srcRows = await sql`SELECT id FROM sources WHERE id = ${requestedSource}`;
+        if (srcRows.length === 0) {
+          res.status(400).json({ error: 'unknown_source', message: `source "${requestedSource}" is not registered` });
+          return;
+        }
+      }
+      const fedRead = Array.isArray(req.body.federatedRead)
+        ? (req.body.federatedRead as unknown[]).filter((s): s is string => typeof s === 'string' && !!s.trim())
+        : undefined;
       const result = await oauthProvider.registerClientManual(
-        name, grants, scopeString, uris, 'default', undefined, validatedAuthMethod,
+        name, grants, scopeString, uris, requestedSource, fedRead, validatedAuthMethod,
       );
       // Set per-client TTL if specified
       if (tokenTtl && Number(tokenTtl) > 0) {
         await sql`UPDATE oauth_clients SET token_ttl = ${Number(tokenTtl)} WHERE client_id = ${result.clientId}`;
+      }
+      // Optional rental limits (control plane / rental clients).
+      const budget = Number((req.body as Record<string, unknown>).budgetUsdPerDay);
+      if (Number.isFinite(budget) && budget >= 0) {
+        await sql`UPDATE oauth_clients SET budget_usd_per_day = ${budget} WHERE client_id = ${result.clientId}`;
       }
       res.json({ ...result, tokenTtl: tokenTtl ? Number(tokenTtl) : null });
     } catch (e) {
@@ -1368,6 +1404,11 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       res.status(500).json({ error: e instanceof Error ? e.message : 'Revoke failed' });
     }
   });
+
+  // Multi-tenant rental control plane (/admin/api/cp/*) — tenants, position
+  // catalog, one-click instance provisioning, request queue, usage rollups.
+  // Own module to keep the fork's upstream touch-points minimal.
+  mountControlPlane({ app, sql, engine, oauthProvider, requireAdmin });
 
   // ---------------------------------------------------------------------------
   // SSE live activity feed
@@ -1622,6 +1663,53 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
       // verifyAccessToken. The env-fallback is gone.
       const tokenSourceId = authInfo.sourceId ?? 'default';
 
+      // Rental metering (control plane, 2026-07-10): LLM-bearing ops burn
+      // provider tokens the OPERATOR pays for — pre-fix, only search_by_image
+      // (Voyage) and subagent jobs were budget-gated; a remote client could
+      // hammer think/query at zero recorded cost. Flat per-op estimates make
+      // oauth_clients.budget_usd_per_day a real cap for every LLM path the
+      // HTTP transport exposes. Estimates are deliberately conservative;
+      // replace with token-usage pricing when the AI-gateway threads usage
+      // back through dispatch. synthesize is dream/admin-only — not listed.
+      const llmOpSpendCents = LLM_OP_SPEND_CENTS_ESTIMATE[name];
+      if (llmOpSpendCents !== undefined) {
+        try {
+          const budgetRows = await sql`
+            SELECT budget_usd_per_day FROM oauth_clients
+            WHERE client_id = ${authInfo.clientId} AND deleted_at IS NULL`;
+          const budgetUsd = Number(budgetRows[0]?.budget_usd_per_day ?? 0);
+          if (budgetUsd > 0) {
+            await checkBudget(engine, authInfo.clientId, Math.round(budgetUsd * 100));
+          }
+        } catch (e) {
+          if (e instanceof BudgetExceededError) {
+            const latency = Date.now() - startTime;
+            try {
+              await executeRawJsonb(
+                engine,
+                `INSERT INTO mcp_request_log (token_name, agent_name, operation, latency_ms, status, error_message, params)
+                 VALUES ($1, $2, $3, $4, $5, $6, $7::jsonb)`,
+                [authInfo.clientId, agentName, name, latency, 'error', 'budget_exceeded'],
+                [logParamsObj],
+              );
+            } catch { /* best effort */ }
+            return {
+              content: [{
+                type: 'text',
+                text: JSON.stringify({
+                  error: 'budget_exceeded',
+                  message: e.message,
+                  spent_cents: e.spentCents,
+                  cap_cents: e.capCents,
+                }),
+              }],
+              isError: true,
+            };
+          }
+          // Budget lookup hiccup — fail-open (same posture as getTodaySpendCents).
+        }
+      }
+
       let toolResult: Awaited<ReturnType<typeof dispatchToolCall>>;
       try {
         toolResult = await dispatchToolCall(engine, name, params as Record<string, unknown> | undefined, {
@@ -1712,6 +1800,17 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
           [logParamsObj],
         );
       } catch { /* best effort */ }
+      // Rental metering: flat-estimate spend for LLM-bearing ops (see the
+      // pre-flight gate above). Best-effort by recordSpend's contract.
+      if (llmOpSpendCents !== undefined) {
+        await recordSpend(engine, {
+          clientId: authInfo.clientId,
+          tokenName: authInfo.clientName ?? authInfo.clientId,
+          operation: name,
+          spendCents: llmOpSpendCents,
+          provider: 'estimate',
+        });
+      }
       broadcastEvent({
         agent: agentName,
         operation: name,
