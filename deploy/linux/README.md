@@ -308,21 +308,35 @@ box. Test locally first (env-override, no config.env edit — see §13).
 
 ---
 
-## 13. Test JusHub locally against this brain (non-destructive)
+## 13. Test JusHub locally against this brain
 
 The JusHub config loader does **not** overload existing env vars
 (`config.go`: `if os.Getenv(key) == ""`), so shell overrides beat `config.env`
-without editing it. From the JusHub repo:
+without editing it.
 
+### Recommended: one-shot client round-trip (verified 2026-07-10)
+`backfill-gbrain` exercises JusHub's real MCP client end-to-end
+(`ai.NewMCPClient` → OAuth `client_credentials` handshake → `put_page`)
+without starting the HTTP server or the local PG/sidecar. It mirrors
+`ai_memory` → the remote:
 ```bash
 GBRAIN_BASE_URL=https://second-brain.yplawfirm.vn/mcp \
 GBRAIN_OAUTH_CLIENT_ID=<yp-admin id> \
 GBRAIN_OAUTH_CLIENT_SECRET=<yp-admin secret> \
-GBRAIN_EXE= \
-JUSLLM_BASE_URL=https://chat.yplawfirm.vn \
-  ./build/jusaihub.exe serve
+  ./build/jusaihub.exe backfill-gbrain
+# → "N mirrored, 0 skipped, 0 failed" proves auth + MCP + write against the
+#   remote. Pages land in yp-global (yp-admin's write source). Idempotent.
 ```
-`GBRAIN_EXE=` (empty) stops the local sidecar from launching; JusHub talks to
-the remote brain instead. Exercise the AI chat (triggers `brain_search`) and
-watch the boot log for the brain wiring. Nothing writes to the remote until
-you run `backfill-gbrain`.
+
+### Full server run — mind the PG supervisor
+`GBRAIN_EXE=` alone is **not** enough to run `serve` against a remote brain:
+the portable-Postgres supervisor starts whenever `GBRAIN_DATABASE_URL` is
+empty (it defaults `GBRAIN_PG_BIN`), and **half-disabling it (blank
+`GBRAIN_PG_BIN` + supervisor still active) hangs boot**. Options:
+- Simplest: leave `GBRAIN_PG_BIN` pointing at a valid dir — the local PG +
+  sidecar start unused while the brain client uses the remote URL.
+- Cleaner (recommended JusHub code follow-up): skip `NewPGSupervisor` when
+  `GBRAIN_BASE_URL` is a remote `https://` URL, so the remote topology needs
+  no local PG at all.
+
+Then exercise the AI chat (triggers `brain_search`) and watch the boot log.
