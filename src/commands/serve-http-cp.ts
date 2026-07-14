@@ -132,7 +132,10 @@ export function mountControlPlane({ app, sql, engine, oauthProvider, requireAdmi
   app.get('/admin/api/cp/positions', requireAdmin, async (_req, res) => {
     try {
       const rows = await sql`
-        SELECT p.*,
+        SELECT p.id, p.slug, p.name, p.description, p.version, p.status,
+          p.price_month_cents::int AS price_month_cents, p.included_calls_month,
+          p.eval_score, p.eval_model, p.evald_at, p.published_at,
+          p.artifact_digest, p.pack_name, p.signer_key, p.created_at,
           (SELECT count(*)::int FROM cp_agent_instances i
              WHERE i.position_id = p.id AND i.status <> 'revoked') AS instance_count,
           (SELECT count(*)::int FROM mcp_request_log l

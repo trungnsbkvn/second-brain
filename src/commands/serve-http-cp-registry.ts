@@ -149,7 +149,8 @@ export function mountRegistry({ app, sql, oauthProvider, requireAdmin, verifyAdm
             pack_name = COALESCE(EXCLUDED.pack_name, cp_positions.pack_name),
             signer_key = COALESCE(EXCLUDED.signer_key, cp_positions.signer_key),
             published_at = now()
-          RETURNING id, slug, name, version, status, eval_score, evald_at, artifact_size, published_at`;
+          RETURNING id, slug, name, version, status, eval_score, evald_at,
+                    artifact_size::int AS artifact_size, published_at`;
         res.json({ position: rows[0] });
       } catch (e) { fail(res, e); }
     });
