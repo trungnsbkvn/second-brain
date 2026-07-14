@@ -221,6 +221,16 @@ If you changed the admin SPA, run `bun run build:admin` on the dev box first
 (the built assets in `admin/dist` + `src/admin-embedded.ts` are committed and
 shipped in the rsync).
 
+**Hot-fix fast path (one-file change).** Because bun runs the TS directly (no
+build step), a single-file fix can go live without the full rsync: edit the file
+under `/srv/gbrain/app`, then `systemctl restart gbrain-http` (add `gbrain-worker`
+if the change touches minions). Back up first (`cp file file.bak-$(date +%s)`).
+**Always mirror the same edit into the fork repo (§10) and commit** — `/srv/gbrain/app`
+is a standalone copy, NOT a git checkout, so an uncommitted hot-patch is silently
+reverted by the next rsync. Example: the `volunteer_context` `prior_context`→`window`
+backward-compat fix (commit `29463f5`) was hot-patched live on 2026-07-14, then
+committed here.
+
 ---
 
 ## 10. Maintaining the fork (git: commit / push / merge / upstream)
