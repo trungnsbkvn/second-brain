@@ -31,6 +31,7 @@ import { hasScope, ALLOWED_SCOPES_LIST, normalizeScopesInput } from '../core/sco
 import { summarizeMcpParams, dispatchToolCall } from '../mcp/dispatch.ts';
 import { paramDefToSchema } from '../mcp/tool-defs.ts';
 import { mountControlPlane } from './serve-http-cp.ts';
+import { mountRegistry } from './serve-http-cp-registry.ts';
 import { checkBudget, recordSpend, BudgetExceededError } from '../core/spend-log.ts';
 
 // Rental metering (control plane, 2026-07-10): flat per-op spend estimates in
@@ -1409,6 +1410,14 @@ export async function runServeHttp(engine: BrainEngine, options: ServeHttpOption
   // catalog, one-click instance provisioning, request queue, usage rollups.
   // Own module to keep the fork's upstream touch-points minimal.
   mountControlPlane({ app, sql, engine, oauthProvider, requireAdmin });
+  // Marketplace registry (/admin/api/cp/positions/publish + /api/catalog/*) —
+  // signed-pack storefront. Publish also accepts the bootstrap token so the
+  // `jusaihub pack publish` CLI (a machine, no cookie) can authenticate.
+  mountRegistry({
+    app, sql, oauthProvider, requireAdmin,
+    verifyAdminToken: (token: string) =>
+      safeHexEqual(createHash('sha256').update(token).digest('hex'), bootstrapHash),
+  });
 
   // ---------------------------------------------------------------------------
   // SSE live activity feed

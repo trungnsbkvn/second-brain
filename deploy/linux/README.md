@@ -250,25 +250,37 @@ git checkout master
 git merge --no-ff feat/<topic>
 git push origin master
 ```
-Our platform code is deliberately isolated so upstream merges stay clean:
-- new files: `deploy/linux/*`, `src/commands/serve-http-cp.ts`,
-  `admin/src/pages/Rental.tsx`
-- minimal touch-points on upstream files: `src/commands/serve-http.ts` (one
-  `mountControlPlane(...)` call + the register-client source fix + the metering
-  block), `src/core/migrate.ts` (migration v123), `src/core/cycle.ts` (the
-  isolation guard), `src/core/config.ts` (one config key),
-  `src/core/ai/recipes/ollama.ts` (bge-m3 dims), `admin/src/{App,api}.ts(x)`.
+Our platform code is deliberately isolated so upstream merges stay clean — the
+authoritative drift registry is **[`UPSTREAM.md`](../../UPSTREAM.md)** (kept at
+the repo root). In short:
+- new files (never conflict): `deploy/linux/*`, `src/commands/serve-http-cp.ts`,
+  `src/commands/serve-http-cp-registry.ts` (marketplace registry),
+  `admin/src/pages/Rental.tsx`, `UPSTREAM.md`
+- minimal touch-points on upstream files: `src/commands/serve-http.ts` (the
+  `mountControlPlane(...)` + `mountRegistry(...)` calls + register-client fix +
+  metering block), `src/core/migrate.ts` (migrations v123 **+ v124**, append-
+  only), `src/core/cycle.ts` (isolation guard), `src/core/config.ts` (one
+  config key), `src/core/ai/recipes/ollama.ts` (bge-m3 dims),
+  `admin/src/{App,api}.ts(x)`.
+
+Before merging, run `deploy/linux/check-touchpoints.sh` to see which of those
+files upstream touched.
 
 ### Rebasing on upstream (pull in new gbrain releases)
 ```bash
 git remote add upstream https://github.com/garrytan/gbrain.git   # once
 git fetch upstream
+deploy/linux/check-touchpoints.sh                  # preview which touch-points drift
 git checkout master && git merge upstream/master   # resolve conflicts in the
                                                    # touch-point files above
+# post-merge smoke gate (UPSTREAM.md §C) BEFORE redeploy:
+bun run typecheck && bun test                      # types + full suite
+deploy/linux/smoke-cp.sh                            # cp_* + /api/catalog smoke
+# re-run the tenant-isolation fuzz — a leak BLOCKS the release.
 # then redeploy (§9) and re-run migrations.
 ```
 Do this ~monthly. Because our changes are file-isolated, conflicts are
-confined to the handful of touch-point files listed above.
+confined to the handful of touch-point files listed above (see `UPSTREAM.md`).
 
 ### Commit-message convention
 Match the fork's style (`vX.Y.Z type(scope): summary (#refs)`) for

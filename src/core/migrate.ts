@@ -5584,6 +5584,48 @@ export const MIGRATIONS: Migration[] = [
         ON cp_rental_requests(status, created_at DESC);
     `,
   },
+  {
+    version: 124,
+    name: 'control_plane_pack_registry',
+    // Marketplace v1: turn the position catalog into a signed-pack REGISTRY.
+    // Authoring/signing/eval stay in JusHub; publishing uploads the SAME
+    // signed .zip the CLI produces + its golden-eval acceptance_rate; any
+    // tenant browses PUBLISHED positions and installs the bundle online
+    // (JusHub feeds it to the UNCHANGED trust gate). All additive:
+    //   cp_positions.artifact_*  — the stored signed bundle (path/digest/size)
+    //   cp_positions.eval_*      — acceptance_rate + model + when (from JusHub
+    //                              RunGoldenEval; the "good enough to sell" gate)
+    //   cp_positions.pack_name   — pack.yaml name (position_code != catalog slug)
+    //   cp_positions.signer_key  — Ed25519 signer pubkey recorded at publish
+    //   cp_positions.published_at
+    //   cp_position_rating       — tenant satisfaction/flag feed for the
+    //                              vendor product console.
+    idempotent: true,
+    sql: `
+      ALTER TABLE cp_positions ADD COLUMN IF NOT EXISTS artifact_path   TEXT;
+      ALTER TABLE cp_positions ADD COLUMN IF NOT EXISTS artifact_digest TEXT;
+      ALTER TABLE cp_positions ADD COLUMN IF NOT EXISTS artifact_size   BIGINT;
+      ALTER TABLE cp_positions ADD COLUMN IF NOT EXISTS eval_score      REAL;
+      ALTER TABLE cp_positions ADD COLUMN IF NOT EXISTS eval_model      TEXT;
+      ALTER TABLE cp_positions ADD COLUMN IF NOT EXISTS evald_at        TIMESTAMPTZ;
+      ALTER TABLE cp_positions ADD COLUMN IF NOT EXISTS pack_name       TEXT;
+      ALTER TABLE cp_positions ADD COLUMN IF NOT EXISTS signer_key      TEXT;
+      ALTER TABLE cp_positions ADD COLUMN IF NOT EXISTS published_at    TIMESTAMPTZ;
+
+      CREATE TABLE IF NOT EXISTS cp_position_rating (
+        id          SERIAL PRIMARY KEY,
+        position_id INTEGER NOT NULL REFERENCES cp_positions(id),
+        tenant_id   INTEGER REFERENCES cp_tenants(id),
+        client_id   TEXT,
+        stars       INTEGER,
+        flagged     BOOLEAN NOT NULL DEFAULT false,
+        comment     TEXT,
+        created_at  TIMESTAMPTZ NOT NULL DEFAULT now()
+      );
+      CREATE INDEX IF NOT EXISTS idx_cp_position_rating
+        ON cp_position_rating(position_id, created_at DESC);
+    `,
+  },
 ];
 
 export const LATEST_VERSION = MIGRATIONS.length > 0

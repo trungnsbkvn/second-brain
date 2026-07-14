@@ -8,7 +8,15 @@ import { api } from '../api';
  */
 
 interface Tenant { id: number; slug: string; name: string; status: string; plan: string | null; instance_count: number; created_at: string }
-interface Position { id: number; slug: string; name: string; version: string; status: string; price_month_cents: number; included_calls_month: number | null; instance_count: number }
+interface Position {
+  id: number; slug: string; name: string; version: string; status: string;
+  price_month_cents: number; included_calls_month: number | null; instance_count: number;
+  // v124 product-console fields (null until a bundle is published via the CLI).
+  eval_score: number | null; eval_model: string | null; evald_at: string | null;
+  published_at: string | null; artifact_digest: string | null; pack_name: string | null;
+  calls_30d: number; avg_rating: number; rating_count: number; flag_count: number;
+}
+interface Rating { id: number; stars: number | null; flagged: boolean; comment: string | null; tenant_slug: string | null; created_at: string }
 interface Instance { id: number; tenant_slug: string; tenant_name: string; position_slug: string | null; client_id: string; client_name: string; source_id: string; status: string; client_disabled: boolean; provisioned_at: string }
 interface RentalRequest { id: number; tenant_slug: string | null; tenant_name: string | null; position_slug: string | null; requested_by: string | null; note: string | null; created_at: string }
 interface UsageRow { tenant: string; position: string; instance_id: number; client_name: string; source_id: string; status: string; calls: number; errors: number; spend_cents: number; included_calls_month: number | null }
@@ -26,6 +34,8 @@ export function RentalPage() {
   // One-time credential display after a provision — the secret is stored
   // hashed server-side and can never be shown again.
   const [provisioned, setProvisioned] = useState<Provision | null>(null);
+  // Ratings drill-down for one position (product-quality signal).
+  const [ratingsFor, setRatingsFor] = useState<{ pos: Position; rows: Rating[] } | null>(null);
 
   const [tSlug, setTSlug] = useState(''); const [tName, setTName] = useState('');
   const [pSlug, setPSlug] = useState(''); const [pName, setPName] = useState('');
@@ -60,6 +70,12 @@ export function RentalPage() {
   });
 
   const money = (cents: number) => `$${(cents / 100).toFixed(2)}`;
+  const openRatings = (pos: Position) => async () => {
+    try {
+      const res = await api.cpPositionRatings(pos.id);
+      setRatingsFor({ pos, rows: res.ratings as Rating[] });
+    } catch (e) { setError(e instanceof Error ? e.message : String(e)); }
+  };
 
   return (
     <div>
@@ -117,16 +133,69 @@ export function RentalPage() {
         <button className="btn btn-primary" onClick={savePosition} disabled={!pSlug || !pName}>Save position</button>
       </div>
       <table>
-        <thead><tr><th>slug</th><th>name</th><th>version</th><th>price/mo</th><th>status</th><th>instances</th></tr></thead>
+        <thead><tr>
+          <th>slug</th><th>name</th><th>version</th><th>eval</th><th>price/mo</th>
+          <th>status</th><th>installs</th><th>calls/30d</th><th>rating</th><th></th>
+        </tr></thead>
         <tbody>
           {positions.map(p => (
             <tr key={p.id}>
               <td className="mono">{p.slug}</td><td>{p.name}</td><td>{p.version}</td>
-              <td>{money(p.price_month_cents)}</td><td>{p.status}</td><td>{p.instance_count}</td>
+              <td>{p.eval_score != null
+                ? <span title={`${p.eval_model ?? ''} · ${p.evald_at?.slice(0, 10) ?? ''}`}
+                        style={{ color: p.eval_score >= 0.6 ? '#3fb950' : '#d29922' }}>
+                    {(p.eval_score * 100).toFixed(0)}%
+                  </span>
+                : <span style={{ color: '#666' }}>—</span>}</td>
+              <td>{money(p.price_month_cents)}</td>
+              <td>{p.status}{!p.artifact_digest ? ' (no bundle)' : ''}</td>
+              <td>{p.instance_count}</td>
+              <td>{p.calls_30d}</td>
+              <td>
+                {p.rating_count > 0
+                  ? <button className="btn btn-link" onClick={openRatings(p)}>
+                      ★ {p.avg_rating.toFixed(1)} ({p.rating_count}){p.flag_count > 0
+                        ? <span style={{ color: '#f85149' }}> ⚑{p.flag_count}</span> : null}
+                    </button>
+                  : <span style={{ color: '#666' }}>—</span>}
+              </td>
+              <td style={{ display: 'flex', gap: 4 }}>
+                {p.status !== 'retired' && <button className="btn btn-secondary" onClick={run(() => api.cpRetirePosition(p.id))}>Retire</button>}
+                {p.status === 'retired' && p.artifact_digest && <button className="btn btn-primary" onClick={run(() => api.cpRepublishPosition(p.id))}>Republish</button>}
+              </td>
             </tr>
           ))}
         </tbody>
       </table>
+      <p style={{ color: '#888', fontSize: 12, marginTop: 4 }}>
+        Publishing a bundle + eval score is the <code>jusaihub pack publish</code> CLI (from JusHub).
+        The catalog row here only flips lifecycle + shows product signals.
+      </p>
+
+      {ratingsFor && (
+        <div className="modal-overlay" onClick={() => setRatingsFor(null)}>
+          <div className="modal" onClick={e => e.stopPropagation()}>
+            <div className="modal-title">Ratings — {ratingsFor.pos.name}</div>
+            {ratingsFor.rows.length === 0 ? <p>No ratings yet.</p> : (
+              <table>
+                <thead><tr><th>tenant</th><th>stars</th><th>flag</th><th>comment</th><th>when</th></tr></thead>
+                <tbody>
+                  {ratingsFor.rows.map(r => (
+                    <tr key={r.id}>
+                      <td className="mono">{r.tenant_slug ?? '-'}</td>
+                      <td>{r.stars != null ? '★'.repeat(r.stars) : '-'}</td>
+                      <td>{r.flagged ? '⚑' : ''}</td>
+                      <td>{r.comment ?? '-'}</td>
+                      <td>{r.created_at?.slice(0, 10)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            )}
+            <button className="btn btn-primary" onClick={() => setRatingsFor(null)}>Close</button>
+          </div>
+        </div>
+      )}
 
       <h2 className="section-title">Agent instances</h2>
       <div style={{ display: 'flex', gap: 8, marginBottom: 8 }}>
