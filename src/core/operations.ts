@@ -3345,17 +3345,29 @@ const volunteer_context: Operation = {
       return volunteerUsageStats(ctx.engine, sourceIds, typeof p.days === 'number' ? p.days : undefined);
     }
 
-    if (typeof p.window !== 'string' || !p.window.trim()) {
+    // Backward-compat: pre-`window` callers (e.g. an older JusHub build) passed
+    // the conversation as `prior_context`, before this op split it into
+    // `window` (the query) + `prior_context` (already-surfaced pages, for
+    // dedup). If `window` is absent but `prior_context` is present, treat the
+    // latter AS the window so those callers keep volunteering instead of hard-
+    // erroring. New callers pass `window` and are unaffected.
+    let windowText = typeof p.window === 'string' ? p.window : '';
+    let priorContext = typeof p.prior_context === 'string' ? p.prior_context : undefined;
+    if (!windowText.trim() && priorContext?.trim()) {
+      windowText = priorContext;
+      priorContext = undefined; // it was the query, not already-surfaced context
+    }
+    if (!windowText.trim()) {
       throw new OperationError(
         'invalid_params',
         'window is required unless stats: true',
         'Pass the recent turns as a string (CLI: pipe them on stdin), or use --stats.',
       );
     }
-    const turns = parseWindow(p.window);
+    const turns = parseWindow(windowText);
     const pages = await volunteerContext(ctx.engine, turns, {
       sourceIds,
-      priorContext: typeof p.prior_context === 'string' ? p.prior_context : undefined,
+      priorContext,
       maxPages: typeof p.max_pages === 'number' ? p.max_pages : undefined,
       minConfidence: typeof p.min_confidence === 'number' ? p.min_confidence : undefined,
     });
