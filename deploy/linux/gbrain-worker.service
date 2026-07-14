@@ -41,7 +41,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=/srv/gbrain /srv/brain-repos
+ReadWritePaths=/srv/gbrain /srv/brain-repos /srv/pack-bundles
 
 [Install]
 WantedBy=multi-user.target

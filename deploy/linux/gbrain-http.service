@@ -49,8 +49,9 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-# Brain app + tenant source repos + GBRAIN_HOME (config.json, PID files).
-ReadWritePaths=/srv/gbrain /srv/brain-repos
+# Brain app + tenant source repos + GBRAIN_HOME (config.json, PID files) +
+# marketplace pack bundles (GBRAIN_PACK_BUNDLES_DIR, default /srv/pack-bundles).
+ReadWritePaths=/srv/gbrain /srv/brain-repos /srv/pack-bundles
 
 [Install]
 WantedBy=multi-user.target

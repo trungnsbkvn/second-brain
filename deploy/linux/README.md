@@ -37,6 +37,9 @@ Live surfaces:
 /srv/gbrain/home         GBRAIN_HOME (config.json, PID files)
 /srv/gbrain/.bun         bun runtime
 /srv/brain-repos/<src>   one git-backed dir per source (per-tenant export/backup)
+/srv/pack-bundles        marketplace signed pack .zip artifacts (GBRAIN_PACK_BUNDLES_DIR).
+                         MUST exist + be gbrain-owned + in the units' ReadWritePaths
+                         (ProtectSystem=strict): mkdir -p /srv/pack-bundles && chown gbrain:gbrain /srv/pack-bundles
 /etc/gbrain.env          secrets (mode 600, owner gbrain)
 /usr/local/bin/gbrain    CLI wrapper (sources /etc/gbrain.env then runs the fork)
 /usr/local/bin/gbrain-*  provisioning + backup scripts
