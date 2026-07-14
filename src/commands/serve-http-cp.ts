@@ -125,14 +125,44 @@ export function mountControlPlane({ app, sql, engine, oauthProvider, requireAdmi
 
   // ── positions (the rentable catalog) ───────────────────────────────────
 
+  // Vendor product console read (v124): each position carries its eval score
+  // (from JusHub RunGoldenEval, stored at publish), install count, 30-day call
+  // volume, and satisfaction (avg stars / rating & flag counts). Scalar
+  // subqueries keep it a single flat row per position (no GROUP-BY fan-out).
   app.get('/admin/api/cp/positions', requireAdmin, async (_req, res) => {
     try {
       const rows = await sql`
-        SELECT p.*, count(i.id)::int AS instance_count
+        SELECT p.*,
+          (SELECT count(*)::int FROM cp_agent_instances i
+             WHERE i.position_id = p.id AND i.status <> 'revoked') AS instance_count,
+          (SELECT count(*)::int FROM mcp_request_log l
+             WHERE l.token_name IN (SELECT client_id FROM cp_agent_instances WHERE position_id = p.id)
+               AND l.created_at >= now() - interval '30 days') AS calls_30d,
+          coalesce((SELECT round(avg(stars)::numeric, 2)::float8
+             FROM cp_position_rating WHERE position_id = p.id AND stars IS NOT NULL), 0) AS avg_rating,
+          (SELECT count(*)::int FROM cp_position_rating
+             WHERE position_id = p.id AND stars IS NOT NULL) AS rating_count,
+          (SELECT count(*)::int FROM cp_position_rating
+             WHERE position_id = p.id AND flagged) AS flag_count
         FROM cp_positions p
-        LEFT JOIN cp_agent_instances i ON i.position_id = p.id AND i.status <> 'revoked'
-        GROUP BY p.id ORDER BY p.slug`;
+        ORDER BY p.slug`;
       res.json({ positions: rows });
+    } catch (e) { fail(res, e); }
+  });
+
+  // Drill-down: recent ratings/flags for one position (product-quality signal).
+  app.get('/admin/api/cp/positions/:id/ratings', requireAdmin, async (req, res) => {
+    try {
+      const id = Number(req.params.id);
+      if (!Number.isInteger(id)) return bad(res, 'bad position id');
+      const rows = await sql`
+        SELECT r.id, r.stars, r.flagged, r.comment, r.created_at,
+               t.slug AS tenant_slug
+        FROM cp_position_rating r
+        LEFT JOIN cp_tenants t ON t.id = r.tenant_id
+        WHERE r.position_id = ${id}
+        ORDER BY r.created_at DESC LIMIT 100`;
+      res.json({ ratings: rows });
     } catch (e) { fail(res, e); }
   });
 

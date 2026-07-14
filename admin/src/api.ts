@@ -61,6 +61,14 @@ export const api = {
   cpPositions: () => apiFetch('/admin/api/cp/positions'),
   cpSavePosition: (p: { slug: string; name: string; priceMonthCents: number; status: string }) =>
     apiFetch('/admin/api/cp/positions', { method: 'POST', body: JSON.stringify(p) }),
+  // Product-console lifecycle (v124) — retire hides a position from tenants;
+  // republish flips a retired-but-uploaded position back (publishing a NEW
+  // bundle is the `jusaihub pack publish` CLI, not the SPA).
+  cpRetirePosition: (id: number) =>
+    apiFetch(`/admin/api/cp/positions/${id}/retire`, { method: 'POST', body: '{}' }),
+  cpRepublishPosition: (id: number) =>
+    apiFetch(`/admin/api/cp/positions/${id}/republish`, { method: 'POST', body: '{}' }),
+  cpPositionRatings: (id: number) => apiFetch(`/admin/api/cp/positions/${id}/ratings`),
   cpInstances: () => apiFetch('/admin/api/cp/instances'),
   cpProvision: (tenantId: number, positionId: number | null, budgetUsdPerDay: number) =>
     apiFetch('/admin/api/cp/instances', { method: 'POST', body: JSON.stringify({ tenantId, positionId, budgetUsdPerDay }) }),
