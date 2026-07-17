@@ -124,6 +124,32 @@ sudo -u gbrain gbrain sources remove tenant-acme --yes --confirm-destructive
   `budget_exceeded` (see `LLM_OP_SPEND_CENTS_ESTIMATE` in serve-http.ts).
 - Voyage image search + subagents are dollar-metered natively (`mcp_spend_log`).
 
+### Marketplace registry (`/api/catalog/*`) & the publish eval gate
+
+`serve-http-cp-registry.ts` serves the signed-pack catalog to tenants
+(`GET /api/catalog/positions`, `/…/bundle`, `POST /…/rating` — all require a
+tenant token) and takes vendor publishes on `/admin/api/cp/positions/publish`
+(admin token; goes through the Caddy `/admin*` IP allowlist, so publish from
+the VPS itself or an office IP). Bundles land in `/srv/pack-bundles`.
+
+**Eval gate at publish** (deployed 2026-07-17, commit `aa6024f`): a publish
+with a missing eval score, or one below the floor, is stored as
+`status='pending_eval'` — visible to the vendor console, **never listed in the
+tenant catalog**. Republishing the slug re-runs the decision, so a scored
+republish promotes it (and an unscored republish DEMOTES a previously
+published slug — the pre-gate rows from 2026-07-14 stay visible only until
+someone republishes them without a score). Knobs in `/etc/gbrain.env`:
+
+```
+CP_REGISTRY_MIN_EVAL=0.8        # floor (default 0.8; matches jusaihub `pack publish --min-eval`)
+CP_REGISTRY_ALLOW_UNSCORED=1    # deliberate bypass — unscored publishes go straight to published
+```
+
+The intended vendor path is JusHub's `jusaihub pack publish` (runs the golden
+eval and sends the score); the raw `curl --data-binary` publish is for
+bootstrap only and now lands in `pending_eval` unless the bypass is set.
+Tests: `test/cp-registry-publish-gate.test.ts`.
+
 ---
 
 ## 5. Managing brain content & knowledge
@@ -223,6 +249,29 @@ ssh -i /e/Develop/_SSH/gdata/id_rsa root@103.226.249.28 '
 If you changed the admin SPA, run `bun run build:admin` on the dev box first
 (the built assets in `admin/dist` + `src/admin-embedded.ts` are committed and
 shipped in the rsync).
+
+**No rsync on the dev box** (Git for Windows doesn't bundle it): deploy the
+committed tree with `git archive` + a directory swap instead — used for the
+2026-07-17 deploy (`aa6024f`). This ships exactly HEAD (no working-tree junk)
+and keeps the old tree as rollback:
+
+```bash
+git archive --format=tar.gz -o /tmp/sb.tar.gz HEAD
+scp -i /e/Develop/_SSH/gdata/id_rsa /tmp/sb.tar.gz root@103.226.249.28:/tmp/
+ssh -i /e/Develop/_SSH/gdata/id_rsa root@103.226.249.28 '
+  mkdir -p /srv/gbrain/app.new
+  tar -xzf /tmp/sb.tar.gz -C /srv/gbrain/app.new
+  mv /srv/gbrain/app/node_modules /srv/gbrain/app.new/     # keep 236M of deps
+  mv /srv/gbrain/app /srv/gbrain/app.old-$(date +%Y%m%d)   # rollback copy
+  mv /srv/gbrain/app.new /srv/gbrain/app
+  chown -R gbrain:gbrain /srv/gbrain/app
+  cd /srv/gbrain/app && sudo -u gbrain /srv/gbrain/.bun/bin/bun install --frozen-lockfile
+  sudo -u gbrain /usr/local/bin/gbrain apply-migrations --yes --non-interactive
+  systemctl restart gbrain-http gbrain-worker'
+```
+
+Remove `app.old-*` once the deploy is verified (`/health` 200 + a catalog
+request answering).
 
 **Hot-fix fast path (one-file change).** Because bun runs the TS directly (no
 build step), a single-file fix can go live without the full rsync: edit the file
