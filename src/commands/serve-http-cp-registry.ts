@@ -9,10 +9,20 @@
  *   VENDOR (admin cookie OR bootstrap bearer token — the `jusaihub pack
  *   publish` CLI is a machine, so it can't hold a cookie):
  *     POST /admin/api/cp/positions/publish        upload signed .zip + eval,
- *                                                 upsert-by-slug, set published
+ *                                                 upsert-by-slug. Status is
+ *                                                 GATED: published only with an
+ *                                                 eval score >= the floor
+ *                                                 (CP_REGISTRY_MIN_EVAL, 0.8);
+ *                                                 missing/low score → the row is
+ *                                                 stored as 'pending_eval' and
+ *                                                 hidden from the tenant catalog.
+ *                                                 CP_REGISTRY_ALLOW_UNSCORED=1
+ *                                                 is the loud emergency bypass.
  *     POST /admin/api/cp/positions/:id/retire     status → retired
  *     POST /admin/api/cp/positions/:id/republish  status → published (needs an
- *                                                 already-uploaded artifact)
+ *                                                 already-uploaded artifact AND
+ *                                                 a stored eval score that
+ *                                                 passes the same gate)
  *
  *   TENANT (OAuth client_credentials — the SAME grant JusHub uses for /mcp;
  *   read scope). NOT admin — JusHub is a tenant browsing the storefront:
@@ -63,6 +73,50 @@ function hdr(req: Request, name: string): string | null {
   if (typeof v !== 'string') return null;
   const t = v.trim();
   return t.length ? t.slice(0, 512) : null;
+}
+
+/** Default minimum golden-eval score a pack needs to reach the tenant catalog. */
+const DEFAULT_MIN_EVAL = 0.8;
+
+/** Resolve the publish floor from CP_REGISTRY_MIN_EVAL (0..1; default 0.8). */
+function minEvalFloor(env: NodeJS.ProcessEnv = process.env): number {
+  const raw = env.CP_REGISTRY_MIN_EVAL;
+  if (raw != null && raw.trim() !== '') {
+    const n = Number(raw);
+    if (Number.isFinite(n) && n >= 0 && n <= 1) return n;
+    console.warn(`[cp-registry] invalid CP_REGISTRY_MIN_EVAL=${JSON.stringify(raw)} (want 0..1) — using default ${DEFAULT_MIN_EVAL}`);
+  }
+  return DEFAULT_MIN_EVAL;
+}
+
+export interface PublishDecision {
+  status: 'published' | 'pending_eval';
+  /** Non-null when the caller should be told the pack is NOT (cleanly) live. */
+  warning: string | null;
+}
+
+/**
+ * The registry publish gate — a pack reaches the tenant catalog only with an
+ * eval score at or above the floor. No score / low score → the row is stored
+ * with status 'pending_eval' (visible in the vendor console, invisible to
+ * tenants — the catalog + bundle endpoints filter status = 'published').
+ * CP_REGISTRY_ALLOW_UNSCORED=1 is the emergency ops bypass (loudly logged).
+ * Exported for tests.
+ */
+export function decidePublishStatus(evalScore: number | null, env: NodeJS.ProcessEnv = process.env): PublishDecision {
+  const floor = minEvalFloor(env);
+  if (evalScore != null && evalScore >= floor) return { status: 'published', warning: null };
+  const why = evalScore == null
+    ? 'no eval score (X-Eval-Score) was submitted'
+    : `eval score ${evalScore} is below the minimum floor ${floor} (CP_REGISTRY_MIN_EVAL)`;
+  if (env.CP_REGISTRY_ALLOW_UNSCORED === '1') {
+    console.warn(`[cp-registry] CP_REGISTRY_ALLOW_UNSCORED=1 BYPASS: publishing although ${why}. This emergency escape hatch skips the eval gate — unset it as soon as possible.`);
+    return { status: 'published', warning: `published via CP_REGISTRY_ALLOW_UNSCORED=1 although ${why}` };
+  }
+  return {
+    status: 'pending_eval',
+    warning: `${why} — stored with status=pending_eval and hidden from the tenant catalog. Re-run the golden eval and republish with X-Eval-Score >= ${floor} (or set CP_REGISTRY_ALLOW_UNSCORED=1 to bypass in an emergency).`,
+  };
 }
 
 export function mountRegistry({ app, sql, oauthProvider, requireAdmin, verifyAdminToken }: RegistryOpts): void {
@@ -121,25 +175,32 @@ export function mountRegistry({ app, sql, oauthProvider, requireAdmin, verifyAdm
         const included = includedRaw != null && Number.isFinite(Number(includedRaw)) ? Number(includedRaw) : null;
         const evaldAt = evalScore != null ? new Date() : null;
 
-        // Upsert by slug: attach the bundle + eval, publish. COALESCE keeps a
-        // previously-set price/description when the CLI omits it.
+        // Publish gate: no/low eval score → row is stored as 'pending_eval'
+        // (kept out of the tenant catalog) instead of silently published.
+        const decision = decidePublishStatus(evalScore);
+        const publishedAt = decision.status === 'published' ? new Date() : null;
+
+        // Upsert by slug: attach the bundle + eval, set the gated status.
+        // COALESCE keeps a previously-set price/description when the CLI
+        // omits it. A re-publish that fails the gate DEMOTES a previously
+        // published row (new bundle = new content = needs a fresh eval).
         const rows = await sql`
           INSERT INTO cp_positions
             (slug, name, description, version, price_month_cents, included_calls_month, status,
              artifact_path, artifact_digest, artifact_size, eval_score, eval_model, evald_at,
              pack_name, signer_key, published_at)
           VALUES
-            (${slug}, ${name}, ${description}, ${version}, ${priceCents ?? 0}, ${included}, 'published',
+            (${slug}, ${name}, ${description}, ${version}, ${priceCents ?? 0}, ${included}, ${decision.status},
              ${artifactPath}, ${contentDigest}, ${body.length}, ${evalScore},
              ${evalModel}, ${evaldAt},
-             ${packName}, ${signerKey}, now())
+             ${packName}, ${signerKey}, ${publishedAt})
           ON CONFLICT (slug) DO UPDATE SET
             name = EXCLUDED.name,
             description = COALESCE(EXCLUDED.description, cp_positions.description),
             version = EXCLUDED.version,
             price_month_cents = COALESCE(${priceCents}, cp_positions.price_month_cents),
             included_calls_month = COALESCE(${included}, cp_positions.included_calls_month),
-            status = 'published',
+            status = ${decision.status},
             artifact_path = EXCLUDED.artifact_path,
             artifact_digest = EXCLUDED.artifact_digest,
             artifact_size = EXCLUDED.artifact_size,
@@ -148,10 +209,11 @@ export function mountRegistry({ app, sql, oauthProvider, requireAdmin, verifyAdm
             evald_at = COALESCE(EXCLUDED.evald_at, cp_positions.evald_at),
             pack_name = COALESCE(EXCLUDED.pack_name, cp_positions.pack_name),
             signer_key = COALESCE(EXCLUDED.signer_key, cp_positions.signer_key),
-            published_at = now()
+            published_at = ${publishedAt}
           RETURNING id, slug, name, version, status, eval_score, evald_at,
                     artifact_size::int AS artifact_size, published_at`;
-        res.json({ position: rows[0] });
+        if (decision.warning) res.json({ position: rows[0], warning: decision.warning });
+        else res.json({ position: rows[0] });
       } catch (e) { fail(res, e); }
     });
 
@@ -166,18 +228,24 @@ export function mountRegistry({ app, sql, oauthProvider, requireAdmin, verifyAdm
   });
 
   // Flip a retired-but-already-uploaded position back to published. Refuses if
-  // it never had a bundle (publish the bundle via the CLI first).
+  // it never had a bundle (publish the bundle via the CLI first) or if its
+  // stored eval score doesn't pass the same publish gate (else republish would
+  // be a silent bypass for a pending_eval row).
   app.post('/admin/api/cp/positions/:id/republish', requireVendor, json, async (req: Request, res: Response) => {
     try {
       const id = Number(req.params.id);
       if (!Number.isInteger(id)) return bad(res, 'bad position id');
-      const cur = await sql`SELECT artifact_path FROM cp_positions WHERE id = ${id}`;
+      const cur = await sql`SELECT artifact_path, eval_score FROM cp_positions WHERE id = ${id}`;
       if (cur.length === 0) return bad(res, 'position not found');
       if (!cur[0].artifact_path) return bad(res, 'position has no uploaded artifact — publish via the CLI first');
+      const storedScore = cur[0].eval_score == null ? null : Number(cur[0].eval_score);
+      const decision = decidePublishStatus(storedScore);
+      if (decision.status !== 'published') return bad(res, `refusing republish: ${decision.warning}`);
       const rows = await sql`
         UPDATE cp_positions SET status = 'published', published_at = now()
         WHERE id = ${id} RETURNING id, slug, status`;
-      res.json({ position: rows[0] });
+      if (decision.warning) res.json({ position: rows[0], warning: decision.warning });
+      else res.json({ position: rows[0] });
     } catch (e) { fail(res, e); }
   });
 
